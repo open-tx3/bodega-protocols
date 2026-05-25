@@ -1,0 +1,12 @@
+{
+  "user": "addr1q9nsd0stv3llw42nrgz9qcm8er4nmwugdtd4rre8pdlekk8pclsjx2fsxl5as44xdxc5m86zj7p0fw2k950xxdz68n9qflm5ny",
+  "positionscript": "addr1w9jw5wpd06f5v53sltrvxpkymraugehamf86r5z3vyl9jygxlhyt4",
+  "user_pkh": "6706be0b647ff755531a04506367c8eb3dbb886adb518f270b7f9b58",
+  "user_stake_key": "e1c7e123293037e9d856a669b14d9f429782f4b9562d1e63345a3cca",
+  "project_info_ref": "fc914f41696c345b1a782e53ef6117c90aee1d7561d4442574a1380d40df71c3#0",
+  "share_policy_id": "6e8181d047370418d7ef48f013ffa1bd986388e84cd9c6eec676d98e",
+  "candidate_name": "425f434330315f594553",
+  "envelope_amount": 2000000,
+  "share_amount": 10,
+  "batcher_fee_amount": 700000
+}

@@ -1,0 +1,12 @@
+{
+  "user": "addr1qxedpq6fw09r7f4wu8cp9sd57q7vphxedf0zn8rzh6uxydluy3ncf0haddh9k75y4s07kz4f7t2c0jr8fg8new2s7p3ssvju2w",
+  "positionscript": "addr1w9jw5wpd06f5v53sltrvxpkymraugehamf86r5z3vyl9jygxlhyt4",
+  "user_pkh": "b2d0834973ca3f26aee1f012c1b4f03cc0dcd96a5e299c62beb86237",
+  "user_stake_key": "fc246784befd6b6e5b7a84ac1feb0aa9f2d587c8674a0f3cb950f063",
+  "project_info_ref": "fc914f41696c345b1a782e53ef6117c90aee1d7561d4442574a1380d40df71c3#0",
+  "buy_amount": 10,
+  "batcher_fee_amount": 700000,
+  "admin_fee_percent": 200,
+  "unit_price": 463443,
+  "total_lovelace": 7334430
+}

@@ -1,0 +1,10 @@
+[protocol]
+name = "bodega_market"
+scope = "bodega-market"
+version = "0.1.0"
+description = "Prediction markets on Cardano with AMM pricing and licensed batcher"
+main = "main.tx3"
+readme = "README.md"
+
+[ledger]
+family = "cardano"

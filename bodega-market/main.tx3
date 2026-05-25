@@ -1,0 +1,741 @@
+// Bodega Market — Prediction Market Protocol (V2)
+// https://github.com/bodega-market/bodega-market-smart-contracts-v2
+//
+// Users buy prediction positions (minting share tokens), then claim
+// rewards or refunds after market resolution. A licensed batcher
+// processes position UTxOs in batches.
+
+// --- Parties ---
+
+// The user buying/claiming positions
+party User;
+
+// Position script address (parameterized per market)
+party PositionScript;
+
+// Prediction script address (holds market state)
+party PredictionScript;
+
+// Project info script address (holds market config)
+party ProjectInfoScript;
+
+// Protocol treasury address (receives fees)
+party ProtocolTreasury;
+
+// Licensed batcher operator
+party Batcher;
+
+// --- Environment ---
+// Per-market deployment configuration (set via profile)
+
+env {
+    // --- Constants (same across all instances) ---
+
+    // NFT token names (hex-encoded, never change)
+    project_info_nft_tn: Bytes,           // "PROJECT_INFO_NFT"
+    project_prediction_nft_tn: Bytes,     // "PROJECT_PREDICTION_NFT"
+
+    // BODEGA token (same token across all instances)
+    bodega_policy_id: Bytes,
+    bodega_token_name: Bytes,             // "BODEGA"
+
+    // Protocol settings NFT (for batcher operations)
+    psettings_nft_policy_id: Bytes,
+    psettings_nft_tn: Bytes,
+
+    // Reference script UTxOs for validators
+    position_script_ref: UtxoRef,
+    prediction_script_ref: UtxoRef,
+
+    // Protocol settings UTxO (reference input for create_market minting)
+    protocol_settings_ref: UtxoRef,
+
+    // Batcher license policy
+    batcher_policy_id: Bytes,
+
+    // --- Per-market config (passed as tx params) ---
+    // share_policy_id, project_outref_tx/idx, envelope_amount
+    // are now tx params instead of env vars, since they change
+    // per market. PositionScript party is also per-market.
+    // payment_policy_id/token_name and oracle_policy_id/token_name
+    // are only used in create_market (already params there).
+}
+
+// --- Types ---
+
+// OutputReference (Constr 0: [tx_hash, output_index])
+type OutputRef {
+    tx_hash: Bytes,
+    output_index: Int,
+}
+
+// Option<PubKeyHash>
+type OptionPkh {
+    SomePkh {
+        value: Bytes,
+    },
+    NonePkh,
+}
+
+// Position type enum
+// IMPORTANT: deployed contract swaps Reward/Refund vs GitHub V2 source.
+// Confirmed on-chain: constructor 2 = RewardPos (batcher burns shares & pays reward).
+// See investigacion/tx-parameter-analysis.md for evidence.
+type PositionType {
+    BuyPos,
+    RefundPos,
+    RewardPos,
+}
+
+// Candidate index — on-chain uses Constr(N,[]) instead of ByteArray.
+// Maps to ProjectInfoDatum.candidates[N].
+// Constr(0,[]) = first candidate (e.g. YES), Constr(1,[]) = second (e.g. NO)
+// NOTE: discovered via on-chain analysis (2026-03-13). The GitHub V2 repo
+//       defines pos_candidate as ByteArray, but mainnet datums use an enum index.
+type CandidateIdx {
+    Candidate0,
+    Candidate1,
+}
+
+// Datum locked at position script UTxOs
+//
+// IMPORTANT: On-chain datum has 9 fields, NOT 7 as in the GitHub V2 repo.
+// See implementation-report.md § "On-chain Datum Analysis" for full details.
+//
+// Fields [6] and [7] are NOT in the public V2 source code:
+//   [6] pos_admin_fee_percent: 200 for BuyPos (=2% base 10000), 0 for Refund/Reward
+//   [7] pos_unit_price: AMM price per share in lovelace at time of buy, 0 for Refund/Reward
+//   [8] pos_candidate: changed from ByteArray to CandidateIdx enum
+//
+// Total lovelace formula (verified on-chain):
+//   total = pos_amount * pos_unit_price
+//         + pos_amount * pos_admin_fee_percent * 1_000_000 / 10_000
+//         + pos_batcher_fee + envelope_amount
+type PositionDatum {
+    outref_id: OutputRef,
+    pos_user_pkh: Bytes,
+    pos_user_stake_key: OptionPkh,
+    pos_type: PositionType,
+    pos_amount: Int,
+    pos_batcher_fee: Int,
+    pos_admin_fee_percent: Int,
+    pos_unit_price: Int,
+    pos_candidate: CandidateIdx,
+}
+
+// Redeemer for position spend validator
+type PositionRedeemer {
+    pred_in_idx: Int,
+}
+
+// Redeemer for share minting policy
+type ShareRedeemer {
+    Buy {
+        project_info_ref_idx: Int,
+    },
+    Reward {
+        pred_in_idx: Int,
+    },
+    Refund {
+        pred_in_idx: Int,
+    },
+}
+
+// Project info datum — market configuration locked at ProjectInfoScript
+// On-chain: 17 fields (GitHub V2: 15). See implementation-report.md.
+type ProjectInfoDatum {
+    outref_id: OutputRef,
+    owner_pkh: Bytes,
+    owner_stake_key: OptionPkh,
+    project_name: Bytes,
+    deadline: Int,
+    pi_payment_policy_id: Bytes,
+    pi_payment_token_name: Bytes,
+    pi_batcher_policy_id: Bytes,
+    position_script_hash: Bytes,
+    pi_share_policy_id: Bytes,
+    pi_oracle_policy_id: Bytes,
+    pi_oracle_token_name: Bytes,
+    admin_fee_percent: Int,
+    pi_envelope_amount: Int,
+    amm_param: Int,                 // on-chain field [14], e.g. 2885 (purpose TBD)
+    candidate_yes_name: Bytes,      // e.g. "B_9EE9_YES"
+    candidate_no_name: Bytes,       // e.g. "B_9EE9_NO"
+}
+
+// Prediction datum — AMM market state locked at PredictionScript
+// On-chain: 7 fields (GitHub V2: 3). Stores full AMM state.
+// Prices are normalized: yes_price + no_price ≈ 1,000,000
+type PredictionDatum {
+    outref_id: OutputRef,
+    total_fee: Int,
+    total_pool: Int,
+    yes_shares: Int,
+    no_shares: Int,
+    yes_price: Int,
+    no_price: Int,
+}
+
+// Redeemer for project auth token minting policy (create market)
+// On-chain: Constr(0, [OutputRef, info_out_idx, ?, settings_ref_idx, treasury_out_idx])
+type AuthTokenMintRedeemer {
+    Mint {
+        seed_outref: OutputRef,
+        info_out_idx: Int,
+        pred_out_idx: Int,
+        settings_ref_idx: Int,
+        treasury_out_idx: Int,
+    },
+}
+
+// Redeemer for prediction spend validator (simplified — Apply only)
+type PredictionRedeemer {
+    Apply {
+        own_input_idx: Int,
+        own_output_idx: Int,
+        project_info_idx: Int,
+        protocol_setting_ref_idx: Int,
+        license_idx: Int,
+    },
+    Reward {
+        own_input_idx: Int,
+        own_output_idx: Int,
+        project_info_idx: Int,
+        protocol_setting_ref_idx: Int,
+        oracle_ref_input_idx: Int,
+        license_idx: Int,
+    },
+    Refund {
+        own_input_idx: Int,
+        own_output_idx: Int,
+        project_info_idx: Int,
+        protocol_setting_ref_idx: Int,
+        license_idx: Int,
+    },
+    WithdrawFee {
+        own_input_idx: Int,
+        own_output_idx: Int,
+        project_info_idx: Int,
+        protocol_setting_ref_idx: Int,
+        license_idx: Int,
+        treasury_out_idx: Int,
+    },
+    Close {
+        project_info_idx: Int,
+        protocol_setting_ref_idx: Int,
+    },
+}
+
+// --- Transactions ---
+
+// 1. Buy Position
+// User creates a BuyPos position UTxO at the position script.
+// No minting or script execution — this is a plain payment with an inline datum.
+// The batcher will later consume this UTxO, mint share tokens,
+// and send them to the user.
+//
+// Reads from ProjectInfoDatum (reference input):
+//   outref_id
+//
+// Params:
+//   project_info_ref    — UTxO holding the ProjectInfoDatum for this market
+//   buy_amount          — number of shares to buy
+//   batcher_fee_amount  — batcher processing fee (typically 700000 lovelace)
+//   admin_fee_percent   — admin fee in base 10000 (e.g. 200 = 2%, 10 = 0.1% for BODEGA holders)
+//                         NOTE: can differ from ProjectInfoDatum.admin_fee_percent (fee tiers)
+//   unit_price          — LMSR average price per share for this trade (off-chain computed)
+//   total_lovelace      — pre-computed total ADA for position UTxO
+//                         Pre-computed by caller because tx3 lacks * and / operators.
+//
+// Split into _yes/_no variants because trix invoke doesn't support enum params.
+tx buy_position_yes(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    buy_amount: Int,
+    batcher_fee_amount: Int,
+    admin_fee_percent: Int,
+    unit_price: Int,
+    total_lovelace: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(total_lovelace) + fees,
+    }
+
+    output position {
+        to: PositionScript,
+        amount: Ada(total_lovelace),
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::BuyPos {},
+            pos_amount: buy_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: admin_fee_percent,
+            pos_unit_price: unit_price,
+            pos_candidate: CandidateIdx::Candidate0 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(total_lovelace) - fees,
+    }
+}
+
+tx buy_position_no(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    buy_amount: Int,
+    batcher_fee_amount: Int,
+    admin_fee_percent: Int,
+    unit_price: Int,
+    total_lovelace: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    metadata {
+        674: "Bodega Market - Buy Position No",
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(total_lovelace) + fees,
+    }
+
+    output position {
+        to: PositionScript,
+        amount: Ada(total_lovelace),
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::BuyPos {},
+            pos_amount: buy_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: admin_fee_percent,
+            pos_unit_price: unit_price,
+            pos_candidate: CandidateIdx::Candidate1 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(total_lovelace) - fees,
+    }
+}
+
+// 2. Submit Reward Claim
+// User sends share tokens to position script as a RewardPos.
+// The batcher will process this after oracle resolution, burning
+// the shares and distributing rewards proportionally.
+//
+// No validator interaction needed — anyone can send to a script address.
+//
+// Reads from ProjectInfoDatum (reference input):
+//   outref_id (in datum only — amount expressions can't use reference fields yet)
+//
+// Split into _yes/_no variants because trix invoke doesn't support enum params.
+tx submit_reward_yes(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    share_policy_id: Bytes,
+    candidate_name: Bytes,
+    envelope_amount: Int,
+    share_amount: Int,
+    batcher_fee_amount: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    locals {
+        shares: AnyAsset(share_policy_id, candidate_name, share_amount),
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    metadata {
+        674: "Bodega Market - Submit Reward Yes",
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(envelope_amount + batcher_fee_amount) + shares + fees,
+    }
+
+    output {
+        to: PositionScript,
+        amount: Ada(envelope_amount + batcher_fee_amount) + shares,
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::RewardPos {},
+            pos_amount: share_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: 0,
+            pos_unit_price: 0,
+            pos_candidate: CandidateIdx::Candidate0 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(envelope_amount + batcher_fee_amount) - shares - fees,
+    }
+}
+
+tx submit_reward_no(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    share_policy_id: Bytes,
+    candidate_name: Bytes,
+    envelope_amount: Int,
+    share_amount: Int,
+    batcher_fee_amount: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    locals {
+        shares: AnyAsset(share_policy_id, candidate_name, share_amount),
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    metadata {
+        674: "Bodega Market - Submit Reward No",
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(envelope_amount + batcher_fee_amount) + shares + fees,
+    }
+
+    output {
+        to: PositionScript,
+        amount: Ada(envelope_amount + batcher_fee_amount) + shares,
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::RewardPos {},
+            pos_amount: share_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: 0,
+            pos_unit_price: 0,
+            pos_candidate: CandidateIdx::Candidate1 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(envelope_amount + batcher_fee_amount) - shares - fees,
+    }
+}
+
+// 3. Sell Position / Submit Refund
+// User creates a RefundPos position UTxO (ADA-only, no share tokens).
+// The batcher processes this by taking shares from the user's wallet,
+// burning them, and returning payment at the recorded AMM price.
+//
+// On-chain, the Bodega dApp calls this "Sell Position".
+// pos_unit_price records the AMM state at sell time.
+//
+// Reads from ProjectInfoDatum (reference input):
+//   outref_id (in datum only — amount expressions can't use reference fields yet)
+//
+// Split into _yes/_no variants because trix invoke doesn't support enum params.
+tx sell_position_yes(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    envelope_amount: Int,
+    share_amount: Int,
+    batcher_fee_amount: Int,
+    admin_fee_percent: Int,
+    unit_price: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(envelope_amount + batcher_fee_amount) + fees,
+    }
+
+    output {
+        to: PositionScript,
+        amount: Ada(envelope_amount + batcher_fee_amount),
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::RefundPos {},
+            pos_amount: share_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: admin_fee_percent,
+            pos_unit_price: unit_price,
+            pos_candidate: CandidateIdx::Candidate0 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(envelope_amount + batcher_fee_amount) - fees,
+    }
+}
+
+tx sell_position_no(
+    user_pkh: Bytes,
+    user_stake_key: Bytes,
+    project_info_ref: UtxoRef,
+    envelope_amount: Int,
+    share_amount: Int,
+    batcher_fee_amount: Int,
+    admin_fee_percent: Int,
+    unit_price: Int,
+) {
+    reference project_info {
+        ref: project_info_ref,
+        datum_is: ProjectInfoDatum,
+    }
+
+    validity {
+        until_slot: tip_slot() + 600,
+    }
+
+    metadata {
+        674: "Bodega Market - Sell Position No",
+    }
+
+    input* source {
+        from: User,
+        min_amount: Ada(envelope_amount + batcher_fee_amount) + fees,
+    }
+
+    output {
+        to: PositionScript,
+        amount: Ada(envelope_amount + batcher_fee_amount),
+        datum: PositionDatum {
+            outref_id: project_info.outref_id,
+            pos_user_pkh: user_pkh,
+            pos_user_stake_key: OptionPkh::SomePkh {
+                value: user_stake_key,
+            },
+            pos_type: PositionType::RefundPos {},
+            pos_amount: share_amount,
+            pos_batcher_fee: batcher_fee_amount,
+            pos_admin_fee_percent: admin_fee_percent,
+            pos_unit_price: unit_price,
+            pos_candidate: CandidateIdx::Candidate1 {},
+        },
+    }
+
+    output {
+        to: User,
+        amount: source - Ada(envelope_amount + batcher_fee_amount) - fees,
+    }
+}
+
+// 4. Create Market
+// Admin deploys a new prediction market. Mints PROJECT_INFO_NFT and
+// PROJECT_PREDICTION_NFT, locks BODEGA pledge, and pays open_fee to treasury.
+//
+// The minting policy is provided as an inline PlutusV3 witness (cm_authtoken_script).
+// PROTOCOL_SETTINGS_NFT is consumed as a reference input for validation.
+//
+// On-chain reference: tx 8797e92d475ad66d... (market 9EE9_MENS_BIG_12_QF_I)
+tx create_market(
+    // Instance config (changes per Bodega instance)
+    cm_authtoken_policy_id: Bytes,
+    cm_authtoken_script: Bytes,
+    cm_pledge_amount: Int,
+    cm_open_fee: Int,
+    // Minting redeemer indices (depend on tx structure)
+    cm_seed_outref_tx: Bytes,
+    cm_seed_outref_idx: Int,
+    cm_info_out_idx: Int,
+    cm_pred_out_idx: Int,
+    cm_settings_ref_idx: Int,
+    cm_treasury_out_idx: Int,
+    // Project identity
+    cm_outref_tx: Bytes,
+    cm_outref_idx: Int,
+    // Owner
+    cm_owner_pkh: Bytes,
+    cm_owner_stake_key: Bytes,
+    // Market config
+    cm_project_name: Bytes,
+    cm_deadline: Int,
+    cm_payment_policy_id: Bytes,
+    cm_payment_token_name: Bytes,
+    cm_batcher_policy_id: Bytes,
+    cm_position_script_hash: Bytes,
+    cm_share_policy_id: Bytes,
+    cm_oracle_policy_id: Bytes,
+    cm_oracle_token_name: Bytes,
+    cm_admin_fee_percent: Int,
+    cm_envelope_amount: Int,
+    cm_amm_param: Int,
+    cm_candidate_yes_name: Bytes,
+    cm_candidate_no_name: Bytes,
+    // Prediction pool
+    cm_prediction_total_lovelace: Int,
+    cm_initial_pool: Int,
+    cm_initial_yes_price: Int,
+    cm_initial_no_price: Int,
+    // Project info UTxO min ADA
+    cm_info_lovelace: Int,
+) {
+    locals {
+        info_nft: AnyAsset(cm_authtoken_policy_id, project_info_nft_tn, 1),
+        pred_nft: AnyAsset(cm_authtoken_policy_id, project_prediction_nft_tn, 1),
+        bodega_pledge: AnyAsset(bodega_policy_id, bodega_token_name, cm_pledge_amount),
+    }
+
+    // Protocol settings as reference input (read-only, for minting policy validation)
+    reference settings {
+        ref: protocol_settings_ref,
+    }
+
+    // Admin wallet provides BODEGA + ADA (NFTs are minted, not pre-held)
+    input* source {
+        from: User,
+        min_amount: Ada(cm_info_lovelace + cm_prediction_total_lovelace + cm_open_fee)
+                  + bodega_pledge + fees,
+    }
+
+    // Collateral for script execution (admin needs a pure-ADA UTxO)
+    collateral {
+        from: User,
+        min_amount: fees,
+    }
+
+    // Mint both NFTs via the auth token minting policy
+    mint {
+        amount: info_nft + pred_nft,
+        redeemer: AuthTokenMintRedeemer::Mint {
+            seed_outref: OutputRef {
+                tx_hash: cm_seed_outref_tx,
+                output_index: cm_seed_outref_idx,
+            },
+            info_out_idx: cm_info_out_idx,
+            pred_out_idx: cm_pred_out_idx,
+            settings_ref_idx: cm_settings_ref_idx,
+            treasury_out_idx: cm_treasury_out_idx,
+        },
+    }
+
+    // Inline PlutusV3 witness for the minting policy
+    cardano::plutus_witness {
+        version: 3,
+        script: cm_authtoken_script,
+    }
+
+    // Output 0: Project info UTxO — PROJECT_INFO_NFT + BODEGA pledge + datum
+    output {
+        to: ProjectInfoScript,
+        amount: Ada(cm_info_lovelace) + info_nft + bodega_pledge,
+        datum: ProjectInfoDatum {
+            outref_id: OutputRef {
+                tx_hash: cm_outref_tx,
+                output_index: cm_outref_idx,
+            },
+            owner_pkh: cm_owner_pkh,
+            owner_stake_key: OptionPkh::SomePkh {
+                value: cm_owner_stake_key,
+            },
+            project_name: cm_project_name,
+            deadline: cm_deadline,
+            pi_payment_policy_id: cm_payment_policy_id,
+            pi_payment_token_name: cm_payment_token_name,
+            pi_batcher_policy_id: cm_batcher_policy_id,
+            position_script_hash: cm_position_script_hash,
+            pi_share_policy_id: cm_share_policy_id,
+            pi_oracle_policy_id: cm_oracle_policy_id,
+            pi_oracle_token_name: cm_oracle_token_name,
+            admin_fee_percent: cm_admin_fee_percent,
+            pi_envelope_amount: cm_envelope_amount,
+            amm_param: cm_amm_param,
+            candidate_yes_name: cm_candidate_yes_name,
+            candidate_no_name: cm_candidate_no_name,
+        },
+    }
+
+    // Output 1: Prediction UTxO — PROJECT_PREDICTION_NFT + initial pool ADA + datum
+    output {
+        to: PredictionScript,
+        amount: Ada(cm_prediction_total_lovelace) + pred_nft,
+        datum: PredictionDatum {
+            outref_id: OutputRef {
+                tx_hash: cm_outref_tx,
+                output_index: cm_outref_idx,
+            },
+            total_fee: 0,
+            total_pool: cm_initial_pool,
+            yes_shares: 0,
+            no_shares: 0,
+            yes_price: cm_initial_yes_price,
+            no_price: cm_initial_no_price,
+        },
+    }
+
+    // Output 2: Open fee to treasury
+    output {
+        to: ProtocolTreasury,
+        amount: Ada(cm_open_fee),
+    }
+
+    // Change back to admin
+    output {
+        to: User,
+        amount: source - Ada(cm_info_lovelace + cm_prediction_total_lovelace + cm_open_fee)
+              - bodega_pledge - fees,
+    }
+}
