@@ -5,6 +5,7 @@ version = "0.1.0"
 description = "Prediction markets on Cardano with AMM pricing and licensed batcher"
 main = "main.tx3"
 readme = "README.md"
+logo = "logo.png"
 repository = "https://github.com/open-tx3/bodega-protocols"
 
 [ledger]
