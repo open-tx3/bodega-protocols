@@ -7,22 +7,22 @@
 
 // --- Parties ---
 
-// The user buying/claiming positions
+/// End user buying prediction positions or claiming rewards/refunds.
 party User;
 
-// Position script address (parameterized per market)
+/// Position script address holding user positions awaiting batcher processing (per-market).
 party PositionScript;
 
-// Prediction script address (holds market state)
+/// Prediction script address holding the AMM market state UTxO.
 party PredictionScript;
 
-// Project info script address (holds market config)
+/// Project info script address holding the market configuration UTxO.
 party ProjectInfoScript;
 
-// Protocol treasury address (receives fees)
+/// Protocol treasury address that collects open fees and admin fees.
 party ProtocolTreasury;
 
-// Licensed batcher operator
+/// Licensed batcher operator that processes position UTxOs in batches.
 party Batcher;
 
 // --- Environment ---
@@ -32,25 +32,30 @@ env {
     // --- Constants (same across all instances) ---
 
     // NFT token names (hex-encoded, never change)
+    /// Token name of the project info NFT (hex-encoded "PROJECT_INFO_NFT").
     project_info_nft_tn: Bytes,           // "PROJECT_INFO_NFT"
+    /// Token name of the project prediction NFT (hex-encoded "PROJECT_PREDICTION_NFT").
     project_prediction_nft_tn: Bytes,     // "PROJECT_PREDICTION_NFT"
 
-    // BODEGA token (same token across all instances)
+    /// Minting policy id of the BODEGA governance token.
     bodega_policy_id: Bytes,
+    /// Token name of the BODEGA governance token (hex-encoded "BODEGA").
     bodega_token_name: Bytes,             // "BODEGA"
 
-    // Protocol settings NFT (for batcher operations)
+    /// Protocol settings NFT policy id (gates batcher operations).
     psettings_nft_policy_id: Bytes,
+    /// Protocol settings NFT token name.
     psettings_nft_tn: Bytes,
 
-    // Reference script UTxOs for validators
+    /// Reference UTxO carrying the position validator script.
     position_script_ref: UtxoRef,
+    /// Reference UTxO carrying the prediction validator script.
     prediction_script_ref: UtxoRef,
 
-    // Protocol settings UTxO (reference input for create_market minting)
+    /// Protocol settings UTxO used as a reference input by create_market minting.
     protocol_settings_ref: UtxoRef,
 
-    // Batcher license policy
+    /// Batcher license minting policy id.
     batcher_policy_id: Bytes,
 
     // --- Per-market config (passed as tx params) ---
@@ -229,33 +234,27 @@ type PredictionRedeemer {
 // --- Transactions ---
 
 // 1. Buy Position
-// User creates a BuyPos position UTxO at the position script.
 // No minting or script execution — this is a plain payment with an inline datum.
-// The batcher will later consume this UTxO, mint share tokens,
-// and send them to the user.
-//
-// Reads from ProjectInfoDatum (reference input):
-//   outref_id
-//
-// Params:
-//   project_info_ref    — UTxO holding the ProjectInfoDatum for this market
-//   buy_amount          — number of shares to buy
-//   batcher_fee_amount  — batcher processing fee (typically 700000 lovelace)
-//   admin_fee_percent   — admin fee in base 10000 (e.g. 200 = 2%, 10 = 0.1% for BODEGA holders)
-//                         NOTE: can differ from ProjectInfoDatum.admin_fee_percent (fee tiers)
-//   unit_price          — LMSR average price per share for this trade (off-chain computed)
-//   total_lovelace      — pre-computed total ADA for position UTxO
-//                         Pre-computed by caller because tx3 lacks * and / operators.
-//
+// The batcher will later consume this UTxO, mint share tokens, and send them to the user.
 // Split into _yes/_no variants because trix invoke doesn't support enum params.
+
+/// Submit a BuyPos position on the YES candidate; batcher will later mint and deliver shares.
 tx buy_position_yes(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Number of shares to buy.
     buy_amount: Int,
+    /// Batcher processing fee in lovelace (typically 700_000).
     batcher_fee_amount: Int,
+    /// Admin fee in base 10000 (e.g. 200 = 2%); may differ from ProjectInfoDatum for fee tiers.
     admin_fee_percent: Int,
+    /// LMSR average price per share for this trade, computed off-chain.
     unit_price: Int,
+    /// Pre-computed total ADA for the position UTxO (tx3 lacks * and / operators).
     total_lovelace: Int,
 ) {
     reference project_info {
@@ -296,14 +295,23 @@ tx buy_position_yes(
     }
 }
 
+/// Submit a BuyPos position on the NO candidate; batcher will later mint and deliver shares.
 tx buy_position_no(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Number of shares to buy.
     buy_amount: Int,
+    /// Batcher processing fee in lovelace (typically 700_000).
     batcher_fee_amount: Int,
+    /// Admin fee in base 10000 (e.g. 200 = 2%); may differ from ProjectInfoDatum for fee tiers.
     admin_fee_percent: Int,
+    /// LMSR average price per share for this trade, computed off-chain.
     unit_price: Int,
+    /// Pre-computed total ADA for the position UTxO (tx3 lacks * and / operators).
     total_lovelace: Int,
 ) {
     reference project_info {
@@ -349,24 +357,28 @@ tx buy_position_no(
 }
 
 // 2. Submit Reward Claim
-// User sends share tokens to position script as a RewardPos.
-// The batcher will process this after oracle resolution, burning
-// the shares and distributing rewards proportionally.
-//
 // No validator interaction needed — anyone can send to a script address.
-//
-// Reads from ProjectInfoDatum (reference input):
-//   outref_id (in datum only — amount expressions can't use reference fields yet)
-//
+// The batcher processes the RewardPos after oracle resolution, burning shares
+// and distributing rewards proportionally.
 // Split into _yes/_no variants because trix invoke doesn't support enum params.
+
+/// Lock YES share tokens as a RewardPos so the batcher can burn them and pay out the reward.
 tx submit_reward_yes(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Minting policy id of this market's share tokens.
     share_policy_id: Bytes,
+    /// Token name of the YES candidate share (e.g. "B_9EE9_YES" hex-encoded).
     candidate_name: Bytes,
+    /// Position envelope ADA carried alongside the shares.
     envelope_amount: Int,
+    /// Number of YES shares to surrender for reward.
     share_amount: Int,
+    /// Batcher processing fee in lovelace.
     batcher_fee_amount: Int,
 ) {
     reference project_info {
@@ -415,14 +427,23 @@ tx submit_reward_yes(
     }
 }
 
+/// Lock NO share tokens as a RewardPos so the batcher can burn them and pay out the reward.
 tx submit_reward_no(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Minting policy id of this market's share tokens.
     share_policy_id: Bytes,
+    /// Token name of the NO candidate share (e.g. "B_9EE9_NO" hex-encoded).
     candidate_name: Bytes,
+    /// Position envelope ADA carried alongside the shares.
     envelope_amount: Int,
+    /// Number of NO shares to surrender for reward.
     share_amount: Int,
+    /// Batcher processing fee in lovelace.
     batcher_fee_amount: Int,
 ) {
     reference project_info {
@@ -472,25 +493,28 @@ tx submit_reward_no(
 }
 
 // 3. Sell Position / Submit Refund
-// User creates a RefundPos position UTxO (ADA-only, no share tokens).
-// The batcher processes this by taking shares from the user's wallet,
+// The batcher processes the RefundPos by taking shares from the user's wallet,
 // burning them, and returning payment at the recorded AMM price.
-//
-// On-chain, the Bodega dApp calls this "Sell Position".
 // pos_unit_price records the AMM state at sell time.
-//
-// Reads from ProjectInfoDatum (reference input):
-//   outref_id (in datum only — amount expressions can't use reference fields yet)
-//
 // Split into _yes/_no variants because trix invoke doesn't support enum params.
+
+/// Submit a RefundPos (Sell Position) on YES so the batcher buys back shares at the AMM price.
 tx sell_position_yes(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Position envelope ADA locked at the position script.
     envelope_amount: Int,
+    /// Number of YES shares to sell (held in user wallet, burned by batcher).
     share_amount: Int,
+    /// Batcher processing fee in lovelace.
     batcher_fee_amount: Int,
+    /// Admin fee in base 10000 applied to the refund payout.
     admin_fee_percent: Int,
+    /// AMM unit price (in lovelace) recorded at sell time for the batcher.
     unit_price: Int,
 ) {
     reference project_info {
@@ -531,14 +555,23 @@ tx sell_position_yes(
     }
 }
 
+/// Submit a RefundPos (Sell Position) on NO so the batcher buys back shares at the AMM price.
 tx sell_position_no(
+    /// User's payment key hash, recorded in the position datum.
     user_pkh: Bytes,
+    /// User's stake key hash, recorded in the position datum.
     user_stake_key: Bytes,
+    /// UTxO holding the ProjectInfoDatum for this market (reference input).
     project_info_ref: UtxoRef,
+    /// Position envelope ADA locked at the position script.
     envelope_amount: Int,
+    /// Number of NO shares to sell (held in user wallet, burned by batcher).
     share_amount: Int,
+    /// Batcher processing fee in lovelace.
     batcher_fee_amount: Int,
+    /// Admin fee in base 10000 applied to the refund payout.
     admin_fee_percent: Int,
+    /// AMM unit price (in lovelace) recorded at sell time for the batcher.
     unit_price: Int,
 ) {
     reference project_info {
@@ -584,53 +617,84 @@ tx sell_position_no(
 }
 
 // 4. Create Market
-// Admin deploys a new prediction market. Mints PROJECT_INFO_NFT and
-// PROJECT_PREDICTION_NFT, locks BODEGA pledge, and pays open_fee to treasury.
-//
 // The minting policy is provided as an inline PlutusV3 witness (cm_authtoken_script).
 // PROTOCOL_SETTINGS_NFT is consumed as a reference input for validation.
-//
 // On-chain reference: tx 8797e92d475ad66d... (market 9EE9_MENS_BIG_12_QF_I)
+
+/// Deploy a new prediction market: mint info/prediction NFTs, lock BODEGA pledge, pay open fee.
 tx create_market(
     // Instance config (changes per Bodega instance)
+    /// Minting policy id of the auth token script that mints both market NFTs.
     cm_authtoken_policy_id: Bytes,
+    /// Inline PlutusV3 auth token minting script bytes.
     cm_authtoken_script: Bytes,
+    /// BODEGA pledge amount locked at the project info UTxO.
     cm_pledge_amount: Int,
+    /// Open fee in lovelace paid to the protocol treasury.
     cm_open_fee: Int,
     // Minting redeemer indices (depend on tx structure)
+    /// Seed UTxO tx hash consumed to anchor the auth token mint.
     cm_seed_outref_tx: Bytes,
+    /// Seed UTxO output index consumed to anchor the auth token mint.
     cm_seed_outref_idx: Int,
+    /// Output index of the project info UTxO in this tx.
     cm_info_out_idx: Int,
+    /// Output index of the prediction UTxO in this tx.
     cm_pred_out_idx: Int,
+    /// Reference input index of the protocol settings UTxO.
     cm_settings_ref_idx: Int,
+    /// Output index of the treasury fee payment in this tx.
     cm_treasury_out_idx: Int,
     // Project identity
+    /// Project identity outref tx hash recorded in datums.
     cm_outref_tx: Bytes,
+    /// Project identity outref index recorded in datums.
     cm_outref_idx: Int,
     // Owner
+    /// Market owner's payment key hash.
     cm_owner_pkh: Bytes,
+    /// Market owner's stake key hash.
     cm_owner_stake_key: Bytes,
     // Market config
+    /// Human-readable project name stored in the datum.
     cm_project_name: Bytes,
+    /// Market deadline as POSIX milliseconds.
     cm_deadline: Int,
+    /// Payment asset policy id accepted by this market.
     cm_payment_policy_id: Bytes,
+    /// Payment asset token name accepted by this market.
     cm_payment_token_name: Bytes,
+    /// Batcher license policy id authorized for this market.
     cm_batcher_policy_id: Bytes,
+    /// Position validator script hash (parameterized per market).
     cm_position_script_hash: Bytes,
+    /// Minting policy id of this market's share tokens.
     cm_share_policy_id: Bytes,
+    /// Oracle NFT policy id used to resolve the market.
     cm_oracle_policy_id: Bytes,
+    /// Oracle NFT token name used to resolve the market.
     cm_oracle_token_name: Bytes,
+    /// Default admin fee in base 10000.
     cm_admin_fee_percent: Int,
+    /// Position envelope ADA amount required per position.
     cm_envelope_amount: Int,
+    /// AMM tuning parameter (on-chain field 14, e.g. 2885).
     cm_amm_param: Int,
+    /// Token name of the YES candidate share (e.g. "B_9EE9_YES").
     cm_candidate_yes_name: Bytes,
+    /// Token name of the NO candidate share (e.g. "B_9EE9_NO").
     cm_candidate_no_name: Bytes,
     // Prediction pool
+    /// Total lovelace locked at the initial prediction UTxO.
     cm_prediction_total_lovelace: Int,
+    /// Initial AMM pool size recorded in the prediction datum.
     cm_initial_pool: Int,
+    /// Initial YES price (normalized so yes + no ~= 1_000_000).
     cm_initial_yes_price: Int,
+    /// Initial NO price (normalized so yes + no ~= 1_000_000).
     cm_initial_no_price: Int,
     // Project info UTxO min ADA
+    /// Minimum ADA attached to the project info UTxO.
     cm_info_lovelace: Int,
 ) {
     locals {
