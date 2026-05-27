@@ -1,10 +1,11 @@
 [protocol]
 name = "bodega_market"
-scope = "bodega-market"
+scope = "open-tx3"
 version = "0.1.0"
 description = "Prediction markets on Cardano with AMM pricing and licensed batcher"
 main = "main.tx3"
 readme = "README.md"
+repository = "https://github.com/open-tx3/bodega-protocols"
 
 [ledger]
 family = "cardano"
