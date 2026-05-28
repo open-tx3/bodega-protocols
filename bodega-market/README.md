@@ -76,9 +76,7 @@ total_lovelace = amount * unit_price
 
 | Parameter | Source |
 |---|---|
-| `user_pkh`, `user_stake_key` | Caller's wallet |
 | `project_outref_tx`, `project_outref_idx` | `ProjectInfoDatum.outref_id` |
-| `buy_amount`, `share_amount` | User's intent |
 | `batcher_fee_amount` | `ProjectInfoDatum` (typically 700 000 lovelace) |
 | `admin_fee_percent` | `ProjectInfoDatum.admin_fee_percent` (or per-position discount value) |
 | `unit_price` | `PredictionDatum.yes_price` or `no_price` |
